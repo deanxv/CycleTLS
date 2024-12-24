@@ -1,0 +1,38 @@
+name: 🧪 🐹 Go Integration/Unit Tests
+
+on: [push]
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        go-version: ['1.21']
+        platform: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ matrix.go-version }}
+      - name: Download Dependencies
+        working-directory: ./cycletls
+        run: go mod download
+      - name: Build
+        working-directory: ./cycletls
+        run: go build -v ./...
+
+      - name: Unit Test
+        working-directory: ./cycletls
+        run: go test --race -v ./...
+
+      - name: Start SOCKS Proxy (only on ubuntu)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          docker run -d -p 9050:9050 dperson/torproxy
+
+      - name: Integration Tests
+        working-directory: ./cycletls
+        run: go test --race -v -tags=integration ./...
