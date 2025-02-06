@@ -481,16 +481,16 @@ func dispatcherSSE(res fullRequest, sseChan chan<- SSEResponse) {
 		}
 	}
 
-	//if err := scanner.Err(); err != nil {
-	//	sseChan <- SSEResponse{
-	//		RequestID: res.options.RequestID,
-	//		Status:    resp.StatusCode,
-	//		Data:      "Error reading stream: " + err.Error(),
-	//		Done:      true,
-	//		FinalUrl:  finalUrl,
-	//	}
-	//	return
-	//}
+	if err := scanner.Err(); err != nil {
+		sseChan <- SSEResponse{
+			RequestID: res.options.RequestID,
+			Status:    resp.StatusCode,
+			Data:      "Error reading stream: " + err.Error(),
+			Done:      true,
+			FinalUrl:  finalUrl,
+		}
+		return
+	}
 
 	sseChan <- SSEResponse{
 		RequestID: res.options.RequestID,
