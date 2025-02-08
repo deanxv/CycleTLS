@@ -440,6 +440,9 @@ func dispatcherSSE(res fullRequest, sseChan chan<- SSEResponse) {
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
+	const maxCapacity = 10 * 1024 * 1024 // 10 MB 通常够用
+	buf := make([]byte, maxCapacity)
+	scanner.Buffer(buf, maxCapacity)
 	// 自定义分割函数，处理SSE格式
 	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
 		if atEOF && len(data) == 0 {
