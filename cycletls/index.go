@@ -14,6 +14,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Options sets CycleTLS client options
@@ -417,6 +418,90 @@ type SSEResponse struct {
 }
 
 // 修改 dispatcher 函数以支持 SSE
+//func dispatcherSSE(res fullRequest, sseChan chan<- SSEResponse) {
+//	defer res.client.CloseIdleConnections()
+//	finalUrl := res.options.Options.URL
+//
+//	resp, err := res.client.Do(res.req)
+//	if err != nil {
+//		parsedError := parseError(err)
+//		sseChan <- SSEResponse{
+//			RequestID: res.options.RequestID,
+//			Status:    parsedError.StatusCode,
+//			Data:      parsedError.ErrorMsg + "-> \n" + string(err.Error()),
+//			Done:      true,
+//			FinalUrl:  finalUrl,
+//		}
+//		return
+//	}
+//	defer resp.Body.Close()
+//
+//	if resp != nil && resp.Request != nil && resp.Request.URL != nil {
+//		finalUrl = resp.Request.URL.String()
+//	}
+//
+//	scanner := bufio.NewScanner(resp.Body)
+//	// 自定义分割函数，处理SSE格式
+//	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+//		if atEOF && len(data) == 0 {
+//			return 0, nil, nil
+//		}
+//
+//		// 查找 "data: " 前缀
+//		if i := bytes.Index(data, []byte("data: ")); i >= 0 {
+//			// 查找下一个 "data: " 或结束
+//			nextI := bytes.Index(data[i+6:], []byte("data: "))
+//			if nextI >= 0 {
+//				return i + 6 + nextI, data[i : i+6+nextI], nil
+//			}
+//			// 如果是最后一块数据
+//			if atEOF {
+//				return len(data), data[i:], nil
+//			}
+//		}
+//
+//		// 如果需要更多数据
+//		if !atEOF {
+//			return 0, nil, nil
+//		}
+//
+//		// 处理剩余数据
+//		return len(data), data, nil
+//	})
+//
+//	for scanner.Scan() {
+//		text := scanner.Text()
+//		if strings.TrimSpace(text) != "" {
+//			sseChan <- SSEResponse{
+//				RequestID: res.options.RequestID,
+//				Status:    resp.StatusCode,
+//				Data:      text,
+//				Done:      false,
+//				FinalUrl:  finalUrl,
+//			}
+//		}
+//	}
+//
+//	if err := scanner.Err(); err != nil {
+//		sseChan <- SSEResponse{
+//			RequestID: res.options.RequestID,
+//			Status:    resp.StatusCode,
+//			Data:      "Error reading stream: " + err.Error(),
+//			Done:      true,
+//			FinalUrl:  finalUrl,
+//		}
+//		return
+//	}
+//
+//	sseChan <- SSEResponse{
+//		RequestID: res.options.RequestID,
+//		Status:    resp.StatusCode,
+//		Data:      "",
+//		Done:      true,
+//		FinalUrl:  finalUrl,
+//	}
+//}
+
 func dispatcherSSE(res fullRequest, sseChan chan<- SSEResponse) {
 	defer res.client.CloseIdleConnections()
 	finalUrl := res.options.Options.URL
@@ -439,62 +524,66 @@ func dispatcherSSE(res fullRequest, sseChan chan<- SSEResponse) {
 		finalUrl = resp.Request.URL.String()
 	}
 
-	scanner := bufio.NewScanner(resp.Body)
-	const maxCapacity = 10 * 1024 * 1024 // 10 MB 通常够用
-	buf := make([]byte, maxCapacity)
-	scanner.Buffer(buf, maxCapacity)
-	// 自定义分割函数，处理SSE格式
-	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-		if atEOF && len(data) == 0 {
-			return 0, nil, nil
-		}
+	reader := bufio.NewReader(resp.Body)
+	var buf bytes.Buffer
 
-		// 查找 "data: " 前缀
-		if i := bytes.Index(data, []byte("data: ")); i >= 0 {
-			// 查找下一个 "data: " 或结束
-			nextI := bytes.Index(data[i+6:], []byte("data: "))
-			if nextI >= 0 {
-				return i + 6 + nextI, data[i : i+6+nextI], nil
+	const maxRetries = 3
+	retries := 0
+
+	for {
+		// 读取直到"data: "
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
 			}
-			// 如果是最后一块数据
-			if atEOF {
-				return len(data), data[i:], nil
+
+			if retries < maxRetries {
+				retries++
+				time.Sleep(time.Second * time.Duration(retries))
+				continue
 			}
-		}
 
-		// 如果需要更多数据
-		if !atEOF {
-			return 0, nil, nil
-		}
-
-		// 处理剩余数据
-		return len(data), data, nil
-	})
-
-	for scanner.Scan() {
-		text := scanner.Text()
-		if strings.TrimSpace(text) != "" {
 			sseChan <- SSEResponse{
 				RequestID: res.options.RequestID,
 				Status:    resp.StatusCode,
-				Data:      text,
-				Done:      false,
+				Data:      "Error reading stream: " + err.Error(),
+				Done:      true,
 				FinalUrl:  finalUrl,
 			}
+			return
+		}
+
+		// 重置重试计数
+		retries = 0
+
+		// 处理数据
+		if strings.HasPrefix(line, "data: ") {
+			// 清空buffer
+			buf.Reset()
+
+			// 写入新数据（去掉"data: "前缀）
+			data := strings.TrimPrefix(line, "data: ")
+			data = strings.TrimSpace(data)
+
+			if data != "" {
+				sseChan <- SSEResponse{
+					RequestID: res.options.RequestID,
+					Status:    resp.StatusCode,
+					Data:      data,
+					Done:      false,
+					FinalUrl:  finalUrl,
+				}
+			}
+		}
+
+		// 可选：检查是否有结束标记
+		if strings.Contains(line, "[DONE]") {
+			break
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		sseChan <- SSEResponse{
-			RequestID: res.options.RequestID,
-			Status:    resp.StatusCode,
-			Data:      "Error reading stream: " + err.Error(),
-			Done:      true,
-			FinalUrl:  finalUrl,
-		}
-		return
-	}
-
+	// 发送完成信号
 	sseChan <- SSEResponse{
 		RequestID: res.options.RequestID,
 		Status:    resp.StatusCode,
