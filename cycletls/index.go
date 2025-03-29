@@ -2,9 +2,9 @@ package cycletls
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"flag"
+	"fmt"
 	http "github.com/Danny-Dasilva/fhttp"
 	"github.com/gorilla/websocket"
 	"io"
@@ -502,8 +502,100 @@ type SSEResponse struct {
 //	}
 //}
 
+//func dispatcherSSE(res fullRequest, sseChan chan<- SSEResponse) {
+//	defer res.client.CloseIdleConnections()
+//	finalUrl := res.options.Options.URL
+//
+//	resp, err := res.client.Do(res.req)
+//	if err != nil {
+//		parsedError := parseError(err)
+//		sseChan <- SSEResponse{
+//			RequestID: res.options.RequestID,
+//			Status:    parsedError.StatusCode,
+//			Data:      parsedError.ErrorMsg + "-> \n" + string(err.Error()),
+//			Done:      true,
+//			FinalUrl:  finalUrl,
+//		}
+//		return
+//	}
+//	defer resp.Body.Close()
+//
+//	if resp != nil && resp.Request != nil && resp.Request.URL != nil {
+//		finalUrl = resp.Request.URL.String()
+//	}
+//
+//	reader := bufio.NewReader(resp.Body)
+//	var buf bytes.Buffer
+//
+//	const maxRetries = 3
+//	retries := 0
+//
+//	for {
+//		// 读取直到"data: "
+//		line, err := reader.ReadString('\n')
+//		if err != nil {
+//			if err == io.EOF {
+//				break
+//			}
+//
+//			if retries < maxRetries {
+//				retries++
+//				time.Sleep(time.Second * time.Duration(retries))
+//				continue
+//			}
+//
+//			sseChan <- SSEResponse{
+//				RequestID: res.options.RequestID,
+//				Status:    resp.StatusCode,
+//				Data:      "Error reading stream: " + err.Error(),
+//				Done:      true,
+//				FinalUrl:  finalUrl,
+//			}
+//			return
+//		}
+//
+//		// 重置重试计数
+//		retries = 0
+//
+//		// 处理数据
+//		if strings.HasPrefix(line, "data: ") {
+//			// 清空buffer
+//			buf.Reset()
+//
+//			// 写入新数据（去掉"data: "前缀）
+//			data := strings.TrimPrefix(line, "data: ")
+//			data = strings.TrimSpace(data)
+//
+//			if data != "" {
+//				sseChan <- SSEResponse{
+//					RequestID: res.options.RequestID,
+//					Status:    resp.StatusCode,
+//					Data:      data,
+//					Done:      false,
+//					FinalUrl:  finalUrl,
+//				}
+//			}
+//		}
+//
+//		// 可选：检查是否有结束标记
+//		if strings.Contains(line, "[DONE]") {
+//			break
+//		}
+//	}
+//
+//	// 发送完成信号
+//	sseChan <- SSEResponse{
+//		RequestID: res.options.RequestID,
+//		Status:    resp.StatusCode,
+//		Data:      "",
+//		Done:      true,
+//		FinalUrl:  finalUrl,
+//	}
+//}
+
 func dispatcherSSE(res fullRequest, sseChan chan<- SSEResponse) {
 	defer res.client.CloseIdleConnections()
+
 	finalUrl := res.options.Options.URL
 
 	resp, err := res.client.Do(res.req)
@@ -512,7 +604,7 @@ func dispatcherSSE(res fullRequest, sseChan chan<- SSEResponse) {
 		sseChan <- SSEResponse{
 			RequestID: res.options.RequestID,
 			Status:    parsedError.StatusCode,
-			Data:      parsedError.ErrorMsg + "-> \n" + string(err.Error()),
+			Data:      fmt.Sprintf("%s-> \n%s", parsedError.ErrorMsg, err.Error()),
 			Done:      true,
 			FinalUrl:  finalUrl,
 		}
@@ -520,18 +612,35 @@ func dispatcherSSE(res fullRequest, sseChan chan<- SSEResponse) {
 	}
 	defer resp.Body.Close()
 
-	if resp != nil && resp.Request != nil && resp.Request.URL != nil {
+	// 检查HTTP状态码，非2xx状态码可能表示错误
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		errorMsg := string(bodyBytes)
+		if errorMsg == "" {
+			errorMsg = fmt.Sprintf("HTTP error status: %d", resp.StatusCode)
+		}
+
+		sseChan <- SSEResponse{
+			RequestID: res.options.RequestID,
+			Status:    resp.StatusCode,
+			Data:      errorMsg,
+			Done:      true,
+			FinalUrl:  finalUrl,
+		}
+		return
+	}
+
+	// 更新最终URL（考虑重定向）
+	if resp.Request != nil && resp.Request.URL != nil {
 		finalUrl = resp.Request.URL.String()
 	}
 
 	reader := bufio.NewReader(resp.Body)
-	var buf bytes.Buffer
-
 	const maxRetries = 3
 	retries := 0
 
 	for {
-		// 读取直到"data: "
+		// 读取直到换行符
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
@@ -557,15 +666,17 @@ func dispatcherSSE(res fullRequest, sseChan chan<- SSEResponse) {
 		// 重置重试计数
 		retries = 0
 
-		// 处理数据
+		// 去除行尾的空白字符
+		line = strings.TrimSpace(line)
+
+		// 跳过空行
+		if line == "" {
+			continue
+		}
+
+		// 处理数据行
 		if strings.HasPrefix(line, "data: ") {
-			// 清空buffer
-			buf.Reset()
-
-			// 写入新数据（去掉"data: "前缀）
-			data := strings.TrimPrefix(line, "data: ")
-			data = strings.TrimSpace(data)
-
+			data := strings.TrimSpace(strings.TrimPrefix(line, "data: "))
 			if data != "" {
 				sseChan <- SSEResponse{
 					RequestID: res.options.RequestID,
@@ -577,7 +688,7 @@ func dispatcherSSE(res fullRequest, sseChan chan<- SSEResponse) {
 			}
 		}
 
-		// 可选：检查是否有结束标记
+		// 检查是否有结束标记
 		if strings.Contains(line, "[DONE]") {
 			break
 		}
