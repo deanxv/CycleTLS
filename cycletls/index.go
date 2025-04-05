@@ -689,7 +689,7 @@ func dispatcherSSE(res fullRequest, sseChan chan<- SSEResponse) {
 		}
 
 		// 检查是否有结束标记
-		if strings.Contains(line, "[DONE]") {
+		if strings.HasSuffix(line, "[DONE]") {
 			break
 		}
 	}
